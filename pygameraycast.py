@@ -81,7 +81,7 @@ class Gamemap:
             [1, 0, 0, 0, 0, 0, 0, 0, 1],
             [1, 0, 1, 1, 1, 0, 0, 0, 1],
             [1, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 2, 1, 1, 1, 1, 1],
         ]
 
         self.map_rows = len(self.gamemap)
@@ -100,9 +100,9 @@ class Gamemap:
         return 1
 
 class World:
-    def __init__(self, texture_mangager: Textures):
+    def __init__(self, texture_manager: Textures):
         self.maptile_size = 32
-        self.textures = texture_mangager
+        self.textures = texture_manager
 
         half_h = SCREEN_HEIGHT // 2
         self.ceil_gradient = pygame.Surface((1, half_h)).convert()
@@ -111,13 +111,15 @@ class World:
         for y in range(half_h):
             floor_dist = (self.maptile_size * half_h) / max(1, (half_h - y))
             ceiling_dist = ((self.maptile_size * 1.5) * half_h) / max(1, (half_h - y))
-            floor_shade = max(0.01, min(1.0, 1.0 - (floor_dist / 100.0)))
-            ceiling_shade = max(0.01, min(1.0, 1.0 - (ceiling_dist / 100.0)))
+            floor_shade = max(0.001, min(1.0, 1.0 - (floor_dist / 150.0)))
+            ceiling_shade = max(0.001, min(1.0, 1.0 - (ceiling_dist / 150.0)))
 
-            self.ceil_gradient.set_at((0, y), (int(150 * ceiling_shade), int(149 * ceiling_shade), int(141 * ceiling_shade)))
-            self.floor_gradient.set_at((0, y), (int(47 * floor_shade), int(45 * floor_shade), int(28 * floor_shade)))
+            self.ceil_gradient.set_at((0, y), (int(5 * ceiling_shade), int(5 * ceiling_shade), int(5 * ceiling_shade)))
+            self.floor_gradient.set_at((0, y), (int(5 * floor_shade), int(5 * floor_shade), int(5 * floor_shade)))
 
-
+        self.ceil_surf = pygame.transform.scale(self.ceil_gradient, (SCREEN_WIDTH, SCREEN_HEIGHT // 2))
+        self.floor_surf = pygame.transform.scale(self.floor_gradient, (SCREEN_WIDTH, SCREEN_HEIGHT // 2))
+        self.floor_surf = pygame.transform.flip(self.floor_surf, False, True)
 
     def draw_walls(self, screen, col_index: int, corrected_dist: int, total_rays: int, wall_id: int, hit_offset: float,  hit_side: int):
         corrected_dist = max(0.1, corrected_dist)
@@ -130,29 +132,65 @@ class World:
         draw_height = max(1, draw_end - draw_start)
         col_width = SCREEN_WIDTH // total_rays
 
-        if draw_start > 0:
-            # Ceiling
-            ceil_slice = self.ceil_gradient.subsurface(pygame.Rect(0, 0, 1, draw_start))
-            ceil_scaled = pygame.transform.scale(ceil_slice, (col_width + 1, draw_start))
-            screen.blit(ceil_scaled, (col_index * col_width, 0))
-
-            # Floor
-            floor_slice = self.floor_gradient.subsurface(pygame.Rect(0, 0, 1, draw_start))
-            floor_scaled = pygame.transform.scale(floor_slice, (col_width + 1, draw_start))
-            floor_scaled = pygame.transform.flip(floor_scaled, False, True)
-            screen.blit(floor_scaled, (col_index * col_width, draw_end))
-
-        shade = max(0.01, min(1.0, 1.0 - (corrected_dist / 100.0)))
+        shade = max(0.01, min(1.0, 1.0 - (corrected_dist / 150)))
         if hit_side == 1:
             shade *= 0.60
 
         col_surf = self.textures.get_column(wall_id, hit_offset, col_width + 1, line_height, draw_height, shade)
         screen.blit(col_surf, (col_index * col_width, draw_start))
 
+    def draw_sprites(self, screen, sprites: list, player, z_buffer: list):
+        col_width = SCREEN_WIDTH // player.rays
 
+        def dist(s):
+            return (s.x - player.pos_x) ** 2 + (s.y - player.pos_y) ** 2
+        sorted_sprites = sorted(sprites, key=dist, reverse=True)
+        player_angle_rad = math.radians(player.angle)
+
+        for sprite in sorted_sprites:
+            dx = sprite.x - player.pos_x
+            dy = sprite.y - player.pos_y
+
+            cos_a = math.cos(player_angle_rad)
+            sin_a = math.sin(player_angle_rad)
+            cam_depth = dx * cos_a + dy * sin_a
+            cam_x = -dx * sin_a + dy * cos_a
+
+
+            if cam_depth <= 0.1:
+                continue
+
+            shade = max(0.01, min(1.0, 1.0 - (cam_depth / 150)))
+            shade_byte = int(shade * 255)
+
+            fov_rad = math.radians(player.fov)
+            proj_plane = (SCREEN_WIDTH / 2) / math.tan(fov_rad / 2)
+            screen_x = int((SCREEN_WIDTH / 2) + (cam_x / cam_depth) * proj_plane)
+            aspect_ratio = sprite.texture.get_width() / sprite.texture.get_height()
+            sprite_height = int((self.maptile_size * SCREEN_HEIGHT / cam_depth) * sprite.scale)
+            sprite_width = int(sprite_height * aspect_ratio)
+            floor_offset = 48
+            draw_top = (SCREEN_HEIGHT // 2) + (self.maptile_size * SCREEN_HEIGHT / (2 * cam_depth)) - sprite_height + floor_offset
+            col_start = screen_x - sprite_width // 2
+            col_end = screen_x + sprite_width // 2
+
+            for col in range(col_start, col_end):
+                if col <0 or col >= SCREEN_WIDTH:
+                    continue
+
+                z_index = col // col_width
+                if z_index < 0 or z_index >= len(z_buffer) or z_buffer[z_index] < cam_depth:
+                    continue
+
+                tex_x = int((col - col_start) / sprite_width * sprite.texture.get_width())
+                tex_strip = sprite.texture.subsurface(pygame.Rect(tex_x, 0, 1, sprite.texture.get_height()))
+                scaled_strip = pygame.transform.scale(tex_strip, (1, max(1, sprite_height))).convert_alpha()
+                scaled_strip.fill((shade_byte, shade_byte, shade_byte), special_flags=pygame.BLEND_RGBA_MULT)
+                screen.blit(scaled_strip, (col, draw_top))
 
 class Player:
     def __init__(self, gamemap: Gamemap, world: World):
+        self.z_buffer = None
         self.world = world
         self.pos_x = 48
         self.pos_y = 48
@@ -161,14 +199,14 @@ class Player:
         self.speed = 1
         self.rot_speed = 8
         self.gamemap = gamemap
-        self.max_distance = 400
-        self.step_size = 0.5
+        self.max_distance = self.gamemap.map_cols + self.gamemap.map_rows // 2
         self.rays = 200
 
-    def move(self, keys):
+    def move(self, keys, dt):
+        speed = self.speed * dt * FPS
         angle_rad = math.radians(self.angle)
-        dx = math.cos(angle_rad) * self.speed
-        dy = math.sin(angle_rad) * self.speed
+        dx = math.cos(angle_rad) * speed
+        dy = math.sin(angle_rad) * speed
 
         if keys[pygame.K_w]:
             new_x = self.pos_x + dx
@@ -184,11 +222,12 @@ class Player:
                 self.pos_x = new_x
                 self.pos_y = new_y
 
-    def rotate(self, keys):
+    def rotate(self, keys, dt):
+        rot_speed = self.rot_speed * dt * FPS
         if keys[pygame.K_a]:
-            self.angle = (self.angle - self.rot_speed) % 360
+            self.angle = (self.angle - rot_speed) % 360
         if keys[pygame.K_d]:
-            self.angle = (self.angle + self.rot_speed) % 360
+            self.angle = (self.angle + rot_speed) % 360
 
     def _cast_single_ray_dda(self, ray_angle: float):
        tile = self.gamemap.maptile_size
@@ -256,32 +295,14 @@ class Player:
 
        return perp_dist, wall_id, hit_offset, hit_side
 
-
-    def _compute_hit_offset(self, hit_x: float, hit_y: float, ray_angle: float) -> float:
-        tile_size = self.gamemap.maptile_size
-        frac_x = (hit_x % tile_size) / tile_size
-        frac_y = (hit_y % tile_size) / tile_size
-        cos_a = math.cos(ray_angle)
-        sin_a = math.sin(ray_angle)
-
-        if cos_a != 0:
-            dist_v = abs(((round(hit_x / tile_size) * tile_size) - hit_x) / cos_a)
-        else:
-            dist_v = float('inf')
-
-        if sin_a != 0:
-            dist_h = abs(((round(hit_y / tile_size) * tile_size) - hit_y) / sin_a)
-        else:
-            dist_h = float('inf')
-
-        if dist_h < dist_v:
-            return frac_x
-        else:
-            return frac_y
-
     def cast_rays(self, screen):
         start_angle = self.angle - (self.fov / 2)
         angle_step = self.fov / (self.rays - 1) if self.rays > 1 else 0
+
+        screen.blit(self.world.ceil_surf, (0, 0))
+        screen.blit(self.world.floor_surf, (0, SCREEN_HEIGHT // 2))
+
+        self.z_buffer = []
 
         for i in range(self.rays):
             ray_angle = math.radians(start_angle + i * angle_step)
@@ -289,10 +310,20 @@ class Player:
             camera_angle = ray_angle - math.radians(self.angle)
             perp_dist *= math.cos(camera_angle)
 
+            self.z_buffer.append(perp_dist)
+
             self.world.draw_walls(screen, i, perp_dist, self.rays, wall_id, hit_offset, hit_side)
 
     def draw(self, screen):
         pass
+
+class Sprite:
+    def __init__(self, x: float, y: float, texture: pygame.Surface, scale: float = 1.0, vert_offset: float = 0.0):
+        self.x = x
+        self.y = y
+        self.texture = texture
+        self.scale = scale
+        self.vert_offset = vert_offset
 
 
 class Game:
@@ -304,36 +335,34 @@ class Game:
         self.text_pos = pygame.font.SysFont('EASVHS Regular', 18)
         self.running = True
         self.gamemap = Gamemap()
+
         self.texture_manager = Textures(texture_width=64, texture_height=64)
-        self.texture_manager.register(1, "assets/yapdollar.png") #texture 1
-        self.texture_manager.register(2, "assets/image2.png") #texture 2
+        self.texture_manager.register(1, "assets/wall1.jpg") #texture 1
+        self.texture_manager.register(2, "assets/yapdollar.png") #texture 2
         self.world = World(self.texture_manager)
         self.player = Player(self.gamemap, self.world)
 
-        self.floor_ceiling_shade = pygame.surface.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        half_h = SCREEN_HEIGHT // 2
-
-        for y in range (half_h):
-            distance = half_h / max(0.001, (half_h - y))
-            shade = max(0.1, min(1.0, 1.0 - (distance / 12.0)))
-            shade_alpha = 255 - int(shade * 255)
-            pygame.draw.line(self.floor_ceiling_shade, (0, 0, 0, shade_alpha), (0, y), (SCREEN_WIDTH, y))
-            pygame.draw.line(self.floor_ceiling_shade, (0, 0, 0, shade_alpha), (0, SCREEN_HEIGHT - 1 - y), (SCREEN_WIDTH, SCREEN_HEIGHT - 1 - y))
+        sprite_tex = pygame.image.load("assets/sprite.png").convert_alpha()
+        self.sprites = [
+            Sprite(80, 80, sprite_tex),
+            Sprite(144, 80, sprite_tex),
+        ]
 
     def event(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
 
-    def update(self, keys):
-        self.player.rotate(keys)
-        self.player.move(keys)
+    def update(self, keys, dt):
+        self.player.rotate(keys, dt)
+        self.player.move(keys, dt)
 
     def draw(self):
         self.screen.fill((0, 0, 0))
 
         self.player.cast_rays(self.screen)
-        self.player.draw(self.screen)
+
+        self.world.draw_sprites(self.screen, self.sprites, self.player, self.player.z_buffer)
 
         fps_text = self.text_fps.render(f'{int(self.clock.get_fps())} FPS', True, TEXT_COLOR)
         pos_text = self.text_pos.render(f'X {int(self.player.pos_x)}  Y {int(self.player.pos_y)}', True, TEXT_COLOR)
@@ -344,10 +373,10 @@ class Game:
 
     def run(self):
         while self.running:
-            self.clock.tick(FPS)
+            dt = self.clock.tick(FPS) / 1000.0
             keys = pygame.key.get_pressed()
             self.event()
-            self.update(keys)
+            self.update(keys, dt)
             self.draw()
         pygame.quit()
         sys.exit()
